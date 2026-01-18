@@ -4,3 +4,4 @@ wikiquote
 requests
 pandas
 groq
+streamlit-js-eval
