@@ -3,7 +3,6 @@ import streamlit as st
 import wikipediaapi
 import wikiquote
 import requests
-import pandas as pd
 import re
 from datetime import datetime
 from groq import Groq
@@ -32,20 +31,15 @@ if "ai_context" not in st.session_state:
 # ---------------------------
 # CLIENTS
 # ---------------------------
-
-# Robust Wikipedia client initialization
-wiki = wikipediaapi.Wikipedia(language="en")  # <- Fixed to prevent TypeError
-
-# Groq client
+wiki = wikipediaapi.Wikipedia(language="en")  # robust init
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
     client = None
 
 # ---------------------------
-# CACHING AND API FUNCTIONS
+# CACHING + API FUNCTIONS
 # ---------------------------
-
 @st.cache_data(ttl=3600)
 def fetch_wikipedia_summary(name: str):
     try:
@@ -53,7 +47,7 @@ def fetch_wikipedia_summary(name: str):
         if page.exists():
             return page.summary, page.fullurl
     except Exception:
-        pass
+        return None, None
     return None, None
 
 @st.cache_data(ttl=3600)
@@ -65,14 +59,14 @@ def fetch_wikiquote_quotes(name: str, max_quotes=12):
 
 @st.cache_data(ttl=3600)
 def fetch_image_url(name: str):
-    """Fetch image safely from Wikipedia via API"""
     try:
         url = (
             "https://en.wikipedia.org/w/api.php"
             "?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=600"
             f"&titles={requests.utils.quote(name)}"
         )
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=8)
+        resp.raise_for_status()
         data = resp.json()
         pages = data.get("query", {}).get("pages", {})
         for p in pages.values():
@@ -84,7 +78,6 @@ def fetch_image_url(name: str):
 
 @st.cache_data(ttl=3600)
 def sparql_query(field: str):
-    """Query Wikidata for notable people"""
     query = f"""
     SELECT ?person ?personLabel ?description ?image WHERE {{
       ?person wdt:P31 wd:Q5 .
@@ -111,7 +104,6 @@ def sparql_query(field: str):
 # ---------------------------
 # AI FUNCTIONS
 # ---------------------------
-
 def ai_generate_lessons(summary: str):
     if not summary or not client:
         return "AI lessons unavailable."
@@ -148,7 +140,6 @@ def ai_chat_as(name: str, question: str, context: str):
         return f"AI error: {e}"
 
 def ai_general_search(query: str):
-    """AI search combining Wikipedia + Wikiquote + context"""
     summary, _ = fetch_wikipedia_summary(query)
     quotes = fetch_wikiquote_quotes(query, max_quotes=3)
     context_text = summary or ""
@@ -161,7 +152,6 @@ def ai_general_search(query: str):
 # ---------------------------
 # UI FUNCTIONS
 # ---------------------------
-
 def render_person_card(name: str, description: str = "", image_url: str = None):
     cols = st.columns([1,3])
     with cols[0]:
@@ -180,8 +170,6 @@ def render_person_card(name: str, description: str = "", image_url: str = None):
 def home_page():
     st.title("✨ Legends & Luminaries")
     st.subheader("Your AI-powered knowledge hub")
-
-    # Daily quote
     daily_names = ["Albert Einstein", "Steve Jobs", "Marcus Aurelius", "Maya Angelou"]
     selected = daily_names[datetime.now().day % len(daily_names)]
     quotes = fetch_wikiquote_quotes(selected)
@@ -189,8 +177,6 @@ def home_page():
         st.info(f"Daily Inspiration: {quotes[0]}")
     else:
         st.info("No quote today.")
-
-    # Featured people
     st.markdown("### Featured Achievers")
     featured = ["Elon Musk", "Sundar Pichai", "Marie Curie", "Greta Thunberg"]
     for name in featured:
@@ -223,8 +209,7 @@ def search_page():
             if summary:
                 st.write(summary)
                 img = fetch_image_url(query)
-                if img:
-                    st.image(img, width=200)
+                if img: st.image(img, width=200)
             else:
                 st.error("No info found.")
 
@@ -244,8 +229,7 @@ def person_detail_page():
     quotes = fetch_wikiquote_quotes(name)
     if quotes:
         st.markdown("### Quotes")
-        for q in quotes[:8]:
-            st.write(f"- {q}")
+        for q in quotes[:8]: st.write(f"- {q}")
     st.markdown("### Key Lessons")
     st.write(ai_generate_lessons(summary))
     st.markdown("### Ask this person")
