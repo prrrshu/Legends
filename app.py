@@ -92,15 +92,15 @@ st.markdown("""
 # ========================
 st.set_page_config(page_title="Legends & Luminaries", page_icon="✨", layout="wide")
 
-# Wikipedia with required user_agent (fixes the TypeError)
+# Wikipedia with required user_agent
 wiki = wikipediaapi.Wikipedia(
-    user_agent="LegendsLuminaries/1.0 (your-email@example.com)",  # Replace with your email
+    user_agent="LegendsLuminaries/1.0 (your-email@example.com)",  # Replace with your email if desired
     language='en'
 )
 
-# Groq client (fixed model name)
+# Groq client - UPDATED to currently supported model (llama3-70b-8192 is decommissioned)
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-MODEL = "llama3-70b-8192"  # Valid, fast, high-quality model on Groq
+MODEL = "llama-3.3-70b-versatile"  # Current, high-quality replacement as per Groq deprecations
 
 # Session state
 if "favorites" not in st.session_state:
@@ -111,16 +111,16 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = {}
 
 # ========================
-# FIELD TO QID MAPPING (Accurate Wikidata queries)
+# FIELD TO QID MAPPING
 # ========================
 field_to_qids = {
-    "Technology": ["Q82594", "Q1709010"],  # Inventor, Software Engineer, etc.
-    "Business": ["Q131524", "Q43845"],      # Entrepreneur, Businessperson
-    "Science": ["Q901"],                   # Scientist
-    "Philosophy": ["Q4964182"],            # Philosopher
-    "Arts": ["Q483501", "Q36180"],         # Artist, Writer
-    "Sports": ["Q2066131"],                # Athlete
-    "Politics": ["Q82955"],                # Politician
+    "Technology": ["Q82594", "Q1709010"],
+    "Business": ["Q131524", "Q43845"],
+    "Science": ["Q901"],
+    "Philosophy": ["Q4964182"],
+    "Arts": ["Q483501", "Q36180"],
+    "Sports": ["Q2066131"],
+    "Politics": ["Q82955"],
 }
 
 # Hardcoded emerging/young stars
@@ -202,7 +202,7 @@ def generate_ai(prompt, max_tokens=600):
         return f"AI unavailable: {str(e)}"
 
 # ========================
-# PERSON CARD COMPONENT
+# PERSON CARD COMPONENT (Fixed signature)
 # ========================
 def person_card(person_name, desc="", pic=None):
     with st.container():
@@ -332,33 +332,40 @@ else:
         if q:
             st.info(f'"{q[0]}" — {daily}')
         st.markdown("### Featured Legends")
-        for p in ["Elon Musk", "Ada Lovelace", "Leonardo da Vinci", "Serena Williams"]:
-            person_card(p)
+        featured = ["Elon Musk", "Ada Lovelace", "Leonardo da Vinci", "Serena Williams"]
+        for p in featured:
+            page_obj = get_wiki_page(p)
+            desc = page_obj.summary[:200] + "..." if page_obj.exists() and page_obj.summary else ""
+            person_card(p, desc=desc, pic=get_image_url(p))
 
     elif page == "Explore by Field":
         field = st.selectbox("Select Field", list(field_to_qids.keys()))
         people = get_people_by_field(field_to_qids[field])
         for p in people:
-            person_card(p["name"], p["desc"], p["pic"])
+            person_card(p["name"], desc=p["desc"], pic=p["pic"])
 
     elif page == "Search":
         query = st.text_input("Search for a person")
         if query:
             page_obj = get_wiki_page(query)
             if page_obj.exists():
-                person_card(query, page_obj.summary[:200], get_image_url(query))
+                person_card(query, desc=page_obj.summary[:200], pic=get_image_url(query))
             else:
                 st.error("Not found")
 
     elif page == "Emerging Stars":
         st.markdown("### 🌟 Rising Young Achievers")
         for name in emerging_stars:
-            person_card(name, image_url=get_image_url(name))
+            page_obj = get_wiki_page(name)
+            desc = page_obj.summary[:200] + "..." if page_obj.exists() and page_obj.summary else ""
+            person_card(name, desc=desc, pic=get_image_url(name))
 
     elif page == "Philosophers":
         philosophers = ["Aristotle", "Plato", "Socrates", "Nietzsche", "Confucius", "Kant"]
         for name in philosophers:
-            person_card(name, image_url=get_image_url(name))
+            page_obj = get_wiki_page(name)
+            desc = page_obj.summary[:200] + "..." if page_obj.exists() and page_obj.summary else ""
+            person_card(name, desc=desc, pic=get_image_url(name))
 
     elif page == "Compare Tool":
         col1, col2 = st.columns(2)
