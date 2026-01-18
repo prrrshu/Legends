@@ -31,7 +31,13 @@ if "ai_context" not in st.session_state:
 # ---------------------------
 # CLIENTS
 # ---------------------------
-wiki = wikipediaapi.Wikipedia(language="en")  # robust init
+def fetch_wikipedia_summary(name: str):
+    if not wiki:
+        return None, None
+    page = wiki.page(name)
+    if page.exists():
+        return page.summary, page.fullurl
+    return None, None
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
