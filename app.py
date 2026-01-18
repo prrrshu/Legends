@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import wikipediaapi
 import wikiquote
@@ -6,66 +7,75 @@ import pandas as pd
 import re
 from datetime import datetime
 from groq import Groq
-import urllib.parse
 
-# ---------------------------------------------------------
+# ---------------------------
 # CONFIGURATION
-# ---------------------------------------------------------
-st.set_page_config(page_title="Legends & Luminaries",
-                   page_icon="✨",
-                   layout="wide")
+# ---------------------------
+st.set_page_config(
+    page_title="Legends & Luminaries",
+    page_icon="✨",
+    layout="wide"
+)
 
-# ---------------------------------------------------------
-# SESSION STATE DEFAULTS
-# ---------------------------------------------------------
-if "selected_person" not in st.session_state:
-    st.session_state.selected_person = None
+# ---------------------------
+# SESSION STATE INIT
+# ---------------------------
 if "favorites" not in st.session_state:
-    st.session_state.favorites = []
-if "ai_search_result" not in st.session_state:
-    st.session_state.ai_search_result = ""
+    st.session_state["favorites"] = []
 
-# ---------------------------------------------------------
+if "selected_person" not in st.session_state:
+    st.session_state["selected_person"] = None
+
+if "ai_context" not in st.session_state:
+    st.session_state["ai_context"] = {}
+
+# ---------------------------
 # CLIENTS
-# ---------------------------------------------------------
-wiki = wikipediaapi.Wikipedia(language="en", extract_format=wikipediaapi.ExtractFormat.WIKI)
-groq_client = None
-try:
-    groq_client = Groq(api_key=st.secrets.get("GROQ_API_KEY"))
-except Exception:
-    pass
+# ---------------------------
 
-# ---------------------------------------------------------
-# UTILITY FUNCTIONS
-# ---------------------------------------------------------
+# Robust Wikipedia client initialization
+wiki = wikipediaapi.Wikipedia(language="en")  # <- Fixed to prevent TypeError
+
+# Groq client
+try:
+    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+except Exception:
+    client = None
+
+# ---------------------------
+# CACHING AND API FUNCTIONS
+# ---------------------------
 
 @st.cache_data(ttl=3600)
-def fetch_wikipedia_summary(name):
+def fetch_wikipedia_summary(name: str):
     try:
         page = wiki.page(name)
         if page.exists():
-            return page.summary[:3000], page.fullurl
+            return page.summary, page.fullurl
     except Exception:
-        return None, None
+        pass
     return None, None
 
 @st.cache_data(ttl=3600)
-def fetch_wikiquote_quotes(name):
+def fetch_wikiquote_quotes(name: str, max_quotes=12):
     try:
-        quotes = wikiquote.quotes(name, max_quotes=15)
-        return quotes
+        return wikiquote.quotes(name, max_quotes=max_quotes)
     except Exception:
         return []
 
 @st.cache_data(ttl=3600)
-def fetch_image_url(name):
+def fetch_image_url(name: str):
+    """Fetch image safely from Wikipedia via API"""
     try:
-        encoded_name = urllib.parse.quote(name)
-        url = f"https://en.wikipedia.org/w/api.php?action=query&titles={encoded_name}&prop=pageimages&format=json&pithumbsize=500"
-        resp = requests.get(url, timeout=8)
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            "?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=600"
+            f"&titles={requests.utils.quote(name)}"
+        )
+        resp = requests.get(url, timeout=10)
         data = resp.json()
         pages = data.get("query", {}).get("pages", {})
-        for _, p in pages.items():
+        for p in pages.values():
             if "thumbnail" in p and "source" in p["thumbnail"]:
                 return p["thumbnail"]["source"]
     except Exception:
@@ -73,7 +83,8 @@ def fetch_image_url(name):
     return None
 
 @st.cache_data(ttl=3600)
-def sparql_query(field, limit=25):
+def sparql_query(field: str):
+    """Query Wikidata for notable people"""
     query = f"""
     SELECT ?person ?personLabel ?description ?image WHERE {{
       ?person wdt:P31 wd:Q5 .
@@ -82,170 +93,208 @@ def sparql_query(field, limit=25):
       FILTER(CONTAINS(LCASE(?occLabel), "{field.lower()}"))
       OPTIONAL {{ ?person wdt:P18 ?image. }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-    }} LIMIT {limit}
+    }}
+    LIMIT 25
     """
     try:
-        url = "https://query.wikidata.org/sparql"
-        headers = {"Accept": "application/sparql-results+json"}
-        resp = requests.get(url, params={"query": query}, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            return []
+        resp = requests.get(
+            "https://query.wikidata.org/sparql",
+            params={"query": query},
+            headers={"Accept": "application/sparql-results+json"},
+            timeout=10
+        )
+        resp.raise_for_status()
         return resp.json().get("results", {}).get("bindings", [])
     except Exception:
         return []
 
-def ai_generate_lessons(summary):
-    if not groq_client or not summary:
-        return "[AI unavailable or no summary]"
+# ---------------------------
+# AI FUNCTIONS
+# ---------------------------
+
+def ai_generate_lessons(summary: str):
+    if not summary or not client:
+        return "AI lessons unavailable."
     try:
-        resp = groq_client.chat.completions.create(
+        response = client.chat.completions.create(
             model="mixtral-8x7b-32768",
             messages=[
-                {"role":"system","content":"Extract key life lessons concisely."},
-                {"role":"user","content":summary}
+                {"role": "system", "content": "Extract key life lessons in bullet points."},
+                {"role": "user", "content": summary}
             ],
-            max_tokens=400,
-            temperature=0.5
+            max_tokens=350,
+            temperature=0.4
         )
-        return resp.choices[0].message.content
+        return response.choices[0].message.content
     except Exception as e:
-        return f"[AI Error] {e}"
+        return f"AI error: {e}"
 
-def ai_search_person(query):
-    """AI fallback when Wikipedia fails."""
-    if not groq_client:
+def ai_chat_as(name: str, question: str, context: str):
+    if not client:
         return "AI unavailable."
     try:
-        resp = groq_client.chat.completions.create(
+        resp = client.chat.completions.create(
             model="mixtral-8x7b-32768",
             messages=[
-                {"role":"system","content":"You are an expert summarizer of biographies."},
-                {"role":"user","content":f"Give a concise bio for: {query}"}
+                {"role": "system", "content": f"Act as {name}. Use their tone."},
+                {"role": "user", "content": f"Context: {context}"},
+                {"role": "user", "content": question}
             ],
-            max_tokens=500,
-            temperature=0.5
+            max_tokens=600,
+            temperature=0.7
         )
         return resp.choices[0].message.content
     except Exception as e:
-        return f"[AI Error] {e}"
+        return f"AI error: {e}"
 
-# ---------------------------------------------------------
-# RENDER PERSON CARD
-# ---------------------------------------------------------
-def render_person_card(name, description=None, image_url=None, summary=None):
-    st.image(image_url if image_url else "https://via.placeholder.com/160x200?text=No+Image", width=160)
-    st.markdown(f"**{name}**")
-    if description:
-        st.write(description)
-    if summary:
-        st.write(summary)
-    if st.button(f"View {name}", key=name):
-        st.session_state.selected_person = name
+def ai_general_search(query: str):
+    """AI search combining Wikipedia + Wikiquote + context"""
+    summary, _ = fetch_wikipedia_summary(query)
+    quotes = fetch_wikiquote_quotes(query, max_quotes=3)
+    context_text = summary or ""
+    if quotes:
+        context_text += "\nQuotes:\n" + "\n".join(quotes)
+    if not client:
+        return context_text or "No information found."
+    return ai_chat_as(query, f"Provide a summary and insights about {query}", context_text)
 
-# ---------------------------------------------------------
-# PAGE SECTIONS
-# ---------------------------------------------------------
+# ---------------------------
+# UI FUNCTIONS
+# ---------------------------
+
+def render_person_card(name: str, description: str = "", image_url: str = None):
+    cols = st.columns([1,3])
+    with cols[0]:
+        if image_url:
+            st.image(image_url, width=120)
+        else:
+            st.image("https://via.placeholder.com/120x160?text=No+Image", width=120)
+    with cols[1]:
+        st.markdown(f"**{name}**")
+        if description:
+            st.write(description[:200] + ("..." if len(description) > 200 else ""))
+        if st.button(f"Open {name}", key=f"open_{name}"):
+            st.session_state["selected_person"] = name
+            st.experimental_rerun()
+
 def home_page():
-    st.header("✨ Legends & Luminaries - Home")
-    names = ["Albert Einstein","Steve Jobs","Marcus Aurelius","Marie Curie","Maya Angelou"]
-    pick = names[datetime.now().day % len(names)]
-    quotes = fetch_wikiquote_quotes(pick)
-    st.info(quotes[0] if quotes else "Be inspired today!")
+    st.title("✨ Legends & Luminaries")
+    st.subheader("Your AI-powered knowledge hub")
 
-    st.subheader("Featured Achievers")
-    featured = ["Sundar Pichai","Elon Musk","Marie Curie","Bill Gates","APJ Abdul Kalam"]
-    cols = st.columns(3)
-    for i, name in enumerate(featured):
-        with cols[i%3]:
-            render_person_card(name, image_url=fetch_image_url(name))
+    # Daily quote
+    daily_names = ["Albert Einstein", "Steve Jobs", "Marcus Aurelius", "Maya Angelou"]
+    selected = daily_names[datetime.now().day % len(daily_names)]
+    quotes = fetch_wikiquote_quotes(selected)
+    if quotes:
+        st.info(f"Daily Inspiration: {quotes[0]}")
+    else:
+        st.info("No quote today.")
 
-def explore_by_field():
-    st.header("Explore by Field")
+    # Featured people
+    st.markdown("### Featured Achievers")
+    featured = ["Elon Musk", "Sundar Pichai", "Marie Curie", "Greta Thunberg"]
+    for name in featured:
+        render_person_card(name, image_url=fetch_image_url(name))
+
+def explore_page():
+    st.title("Explore by Field")
     fields = ["Technology","Business","Science","Philosophy","Arts","Sports","Politics","Young Achievers"]
-    field = st.selectbox("Choose Field:", fields)
+    field = st.selectbox("Select Field:", fields)
     data = sparql_query(field)
     if not data:
-        st.warning("No data found for this field.")
+        st.warning("No results found.")
         return
-    cols = st.columns(3)
-    for i, item in enumerate(data):
-        with cols[i%3]:
-            name = item["personLabel"]["value"]
-            desc = item.get("description",{}).get("value","")
-            img = item.get("image",{}).get("value")
-            render_person_card(name, description=desc, image_url=img)
+    for item in data:
+        render_person_card(
+            name=item["personLabel"]["value"],
+            description=item.get("description", {}).get("value",""),
+            image_url=item.get("image", {}).get("value")
+        )
 
 def search_page():
-    st.header("Search Achievers")
-    query = st.text_input("Enter Name:")
+    st.title("Search Achievers / AI Search")
+    query = st.text_input("Enter name:")
+    ai_mode = st.checkbox("AI-enhanced search")
     if query:
-        summary, url = fetch_wikipedia_summary(query)
-        if summary:
-            img = fetch_image_url(query)
-            render_person_card(query, summary=summary, image_url=img)
+        if ai_mode:
+            st.write(ai_general_search(query))
         else:
-            st.warning("Not found on Wikipedia. Using AI to summarize...")
-            ai_result = ai_search_person(query)
-            st.session_state.ai_search_result = ai_result
-            st.info(ai_result)
+            summary, _ = fetch_wikipedia_summary(query)
+            if summary:
+                st.write(summary)
+                img = fetch_image_url(query)
+                if img:
+                    st.image(img, width=200)
+            else:
+                st.error("No info found.")
 
 def person_detail_page():
     name = st.session_state.get("selected_person")
     if not name:
         st.warning("No person selected.")
         return
-    st.header(name)
+    st.title(name)
     img = fetch_image_url(name)
-    if img:
-        st.image(img, width=220)
-    summary, url = fetch_wikipedia_summary(name)
-    st.write(summary if summary else "[No Wikipedia summary available]")
+    if img: st.image(img, width=250)
+    summary, _ = fetch_wikipedia_summary(name)
+    st.write(summary)
     with st.expander("Full Biography"):
-        try:
-            st.write(wiki.page(name).text[:5000])
-        except Exception:
-            st.write("[Unable to fetch full text]")
+        page = wiki.page(name)
+        st.write(page.text)
     quotes = fetch_wikiquote_quotes(name)
     if quotes:
-        st.subheader("Quotes")
+        st.markdown("### Quotes")
         for q in quotes[:8]:
             st.write(f"- {q}")
-    st.subheader("Key Lessons")
+    st.markdown("### Key Lessons")
     st.write(ai_generate_lessons(summary))
-
-def emerging_stars_page():
-    st.header("Emerging Stars")
-    stars = ["R Praggnanandhaa","Gitanjali Rao","Emma Raducanu"]
-    for s in stars:
-        render_person_card(s, image_url=fetch_image_url(s))
-
-def ai_agent_page():
-    st.header("AI Knowledge Agent")
-    question = st.text_area("Ask anything about people or philosophy:")
-    if question:
-        result = ai_general_chat(question,"General knowledge context")
-        st.info(result)
+    st.markdown("### Ask this person")
+    q = st.text_input("Your question to them:")
+    if q:
+        st.write(ai_chat_as(name, q, summary))
 
 def compare_page():
-    st.header("Compare Two People")
+    st.title("Compare Two People")
     a = st.text_input("Person A")
     b = st.text_input("Person B")
     if a and b:
-        sumA,_ = fetch_wikipedia_summary(a)
-        sumB,_ = fetch_wikipedia_summary(b)
-        if not sumA: sumA = ai_search_person(a)
-        if not sumB: sumB = ai_search_person(b)
-        result = ai_compare(a,b,sumA,sumB)
-        st.info(result)
+        summaryA,_ = fetch_wikipedia_summary(a)
+        summaryB,_ = fetch_wikipedia_summary(b)
+        if summaryA and summaryB:
+            st.write(ai_chat_as(f"Compare {a} vs {b}", "", f"{summaryA}\n{summaryB}"))
+        else:
+            st.error("One or both people not found.")
 
-# ---------------------------------------------------------
-# SIDEBAR NAVIGATION
-# ---------------------------------------------------------
-menu = st.sidebar.selectbox("Navigate", ["Home","Explore by Field","Search","Person Detail","Compare","Emerging Stars","AI Agent"])
+def emerging_page():
+    st.title("Emerging Stars")
+    stars = ["R Praggnanandhaa","Gitanjali Rao","Emma Raducanu","Khaby Lame"]
+    for s in stars:
+        render_person_card(s, image_url=fetch_image_url(s))
+
+def philosophers_page():
+    st.title("Philosophers")
+    names = ["Plato","Aristotle","Socrates","Confucius","Nietzsche"]
+    for n in names:
+        render_person_card(n, image_url=fetch_image_url(n))
+
+def ai_agent_page():
+    st.title("AI Knowledge Agent")
+    question = st.text_area("Ask anything:")
+    if question:
+        st.write(ai_general_search(question))
+
+# ---------------------------
+# SIDEBAR
+# ---------------------------
+menu = st.sidebar.selectbox("Navigate", [
+    "Home","Explore by Field","Search","Person Details","Philosophers","AI Agent","Compare Tool","Emerging Stars"
+])
+
 if menu=="Home": home_page()
-elif menu=="Explore by Field": explore_by_field()
+elif menu=="Explore by Field": explore_page()
 elif menu=="Search": search_page()
-elif menu=="Person Detail": person_detail_page()
-elif menu=="Compare": compare_page()
-elif menu=="Emerging Stars": emerging_stars_page()
+elif menu=="Person Details": person_detail_page()
+elif menu=="Philosophers": philosophers_page()
 elif menu=="AI Agent": ai_agent_page()
+elif menu=="Compare Tool": compare_page()
+elif menu=="Emerging Stars": emerging_page()
