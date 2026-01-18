@@ -1,296 +1,391 @@
-# app.py
 import streamlit as st
 import wikipediaapi
 import wikiquote
 import requests
-from datetime import datetime
 from groq import Groq
+import urllib.parse
+import random
 
-# ---------------------------
-# CONFIGURATION
-# ---------------------------
-st.set_page_config(
-    page_title="Legends & Luminaries",
-    page_icon="✨",
-    layout="wide"
+# ========================
+# PREMIUM UI STYLING (CSS Injection)
+# ========================
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Roboto', sans-serif;
+    }
+
+    .stApp {
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+        color: #e0e0e0;
+    }
+
+    h1, h2, h3, h4 {
+        color: #ffffff !important;
+        font-weight: 700;
+    }
+
+    .stMarkdown, .stText {
+        color: #e0e0e0;
+    }
+
+    /* Card Style */
+    .person-card {
+        background: rgba(255, 255, 255, 0.15);
+        backdrop-filter: blur(12px);
+        border-radius: 16px;
+        padding: 20px;
+        margin: 12px 0;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        transition: all 0.3s ease;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    .person-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    /* Top Header */
+    .top-header {
+        background: rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(10px);
+        padding: 15px 20px;
+        border-radius: 12px;
+        margin-bottom: 30px;
+        text-align: center;
+    }
+
+    /* Sidebar */
+    .css-1d391kg {  /* Sidebar background */
+        background: rgba(0, 0, 0, 0.4);
+    }
+
+    /* Buttons */
+    .stButton>button {
+        background: rgba(255, 255, 255, 0.2);
+        color: white;
+        border: none;
+        border-radius: 10px;
+        transition: 0.3s;
+    }
+
+    .stButton>button:hover {
+        background: rgba(255, 255, 255, 0.4);
+        transform: scale(1.05);
+    }
+
+    /* Chat messages */
+    .stChatMessage {
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 12px;
+        margin: 8px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# ========================
+# CONFIG & INITIALIZATION
+# ========================
+st.set_page_config(page_title="Legends & Luminaries", page_icon="✨", layout="wide")
+
+# Wikipedia with required user_agent (fixes the TypeError)
+wiki = wikipediaapi.Wikipedia(
+    user_agent="LegendsLuminaries/1.0 (your-email@example.com)",  # Replace with your email
+    language='en'
 )
 
-# ---------------------------
-# SESSION STATE INIT
-# ---------------------------
+# Groq client (fixed model name)
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+MODEL = "llama3-70b-8192"  # Valid, fast, high-quality model on Groq
+
+# Session state
 if "favorites" not in st.session_state:
-    st.session_state["favorites"] = []
-
+    st.session_state.favorites = []
 if "selected_person" not in st.session_state:
-    st.session_state["selected_person"] = None
+    st.session_state.selected_person = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = {}
 
-if "ai_context" not in st.session_state:
-    st.session_state["ai_context"] = {}
+# ========================
+# FIELD TO QID MAPPING (Accurate Wikidata queries)
+# ========================
+field_to_qids = {
+    "Technology": ["Q82594", "Q1709010"],  # Inventor, Software Engineer, etc.
+    "Business": ["Q131524", "Q43845"],      # Entrepreneur, Businessperson
+    "Science": ["Q901"],                   # Scientist
+    "Philosophy": ["Q4964182"],            # Philosopher
+    "Arts": ["Q483501", "Q36180"],         # Artist, Writer
+    "Sports": ["Q2066131"],                # Athlete
+    "Politics": ["Q82955"],                # Politician
+}
 
-# ---------------------------
-# MODEL CONFIGURATION
-# ---------------------------
-MODEL_NAME = "mixtral-8x7b"  # Updated Groq model
+# Hardcoded emerging/young stars
+emerging_stars = [
+    "R Praggnanandhaa", "Gitanjali Rao", "Emma Raducanu", "Alexandr Wang",
+    "Vitalik Buterin", "Lucy Guo", "Austin Russell"
+]
 
-# ---------------------------
-# CLIENT INITIALIZATION
-# ---------------------------
-try:
-    wiki = wikipediaapi.Wikipedia(language="en")
-except Exception:
-    wiki = None
-
-try:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-except Exception:
-    client = None
-
-# ---------------------------
-# CACHING FUNCTIONS
-# ---------------------------
+# ========================
+# CACHED FUNCTIONS
+# ========================
 @st.cache_data(ttl=3600)
-def fetch_wikipedia_summary(name: str):
-    try:
-        if not wiki:
-            return None, None
-        page = wiki.page(name)
-        if page.exists():
-            return page.summary, page.fullurl
-    except Exception:
-        return None, None
-    return None, None
+def get_wiki_page(title):
+    return wiki.page(title)
 
 @st.cache_data(ttl=3600)
-def fetch_wikiquote_quotes(name: str, max_quotes=12):
+def get_quotes(person):
     try:
-        return wikiquote.quotes(name, max_quotes=max_quotes)
-    except Exception:
+        return wikiquote.quotes(person, lang="en")[:15]
+    except:
         return []
 
 @st.cache_data(ttl=3600)
-def fetch_image_url(name: str):
-    """Fetch image from Wikipedia API safely."""
+def get_image_url(person):
     try:
-        url = (
-            "https://en.wikipedia.org/w/api.php"
-            "?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=600"
-            f"&titles={requests.utils.quote(name)}"
-        )
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        pages = data.get("query", {}).get("pages", {})
-        for p in pages.values():
-            if "thumbnail" in p and "source" in p["thumbnail"]:
-                return p["thumbnail"]["source"]
-    except Exception:
-        return None
+        page = get_wiki_page(person)
+        images = list(page.images.keys())
+        for img in images:
+            if "jpg" in img.lower() or "png" in img.lower():
+                return img
+    except:
+        pass
     return None
 
 @st.cache_data(ttl=3600)
-def sparql_query(field: str):
-    """Query Wikidata for notable people by field."""
-    query = f"""
-    SELECT ?person ?personLabel ?description ?image WHERE {{
+def get_people_by_field(qids, limit=20):
+    if not qids:
+        return []
+    values = " ".join(f"wd:{q}" for q in qids)
+    sparql = f"""
+    SELECT ?person ?personLabel ?desc ?pic WHERE {{
       ?person wdt:P31 wd:Q5 .
-      ?person wdt:P106 ?occupation .
-      ?occupation rdfs:label ?occLabel .
-      FILTER(CONTAINS(LCASE(?occLabel), "{field.lower()}"))
-      OPTIONAL {{ ?person wdt:P18 ?image. }}
+      VALUES ?occ {{ {values} }}
+      ?person wdt:P106 ?occ .
+      OPTIONAL {{ ?person wdt:P18 ?pic }}
+      OPTIONAL {{ ?person schema:description ?desc FILTER(LANG(?desc)="en") }}
       SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
-    }}
-    LIMIT 25
+    }} LIMIT {limit*5}
     """
     try:
-        resp = requests.get(
-            "https://query.wikidata.org/sparql",
-            params={"query": query},
-            headers={"Accept": "application/sparql-results+json"},
-            timeout=10
-        )
-        resp.raise_for_status()
-        return resp.json().get("results", {}).get("bindings", [])
-    except Exception:
+        r = requests.get("https://query.wikidata.org/sparql", params={'query': sparql, 'format': 'json'})
+        data = r.json()
+        results = []
+        seen = set()
+        for item in data['results']['bindings']:
+            name = item['personLabel']['value']
+            if name in seen: continue
+            seen.add(name)
+            results.append({
+                "name": name,
+                "desc": item.get('desc', {}).get('value', ''),
+                "pic": item.get('pic', {}).get('value')
+            })
+            if len(results) >= limit: break
+        return results
+    except:
         return []
 
-# ---------------------------
-# AI FUNCTIONS
-# ---------------------------
-def ai_generate_lessons(summary: str):
-    if not summary or not client:
-        return "AI lessons unavailable."
+def generate_ai(prompt, max_tokens=600):
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "Extract key life lessons in bullet points."},
-                {"role": "user", "content": summary}
-            ],
-            max_tokens=350,
-            temperature=0.4
+        chat = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=max_tokens
         )
-        return response.choices[0].message.content
+        return chat.choices[0].message.content
     except Exception as e:
-        return f"AI error: {e}"
+        return f"AI unavailable: {str(e)}"
 
-def ai_chat_as(name: str, question: str, context: str):
-    if not client:
-        return "AI unavailable."
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": f"Act as {name}. Use their tone and style."},
-                {"role": "user", "content": f"Context: {context}"},
-                {"role": "user", "content": question}
-            ],
-            max_tokens=600,
-            temperature=0.7
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        return f"AI error: {e}"
-
-def ai_general_search(query: str):
-    summary, _ = fetch_wikipedia_summary(query)
-    quotes = fetch_wikiquote_quotes(query, max_quotes=3)
-    context_text = summary or ""
-    if quotes:
-        context_text += "\nQuotes:\n" + "\n".join(quotes)
-    if not client:
-        return context_text or "No information found."
-    return ai_chat_as(query, f"Provide a summary and insights about {query}", context_text)
-
-# ---------------------------
-# UI FUNCTIONS
-# ---------------------------
-def render_person_card(name: str, description: str = "", image_url: str = None):
-    cols = st.columns([1,3])
-    with cols[0]:
-        if image_url:
-            st.image(image_url, width=120)
-        else:
-            st.image("https://via.placeholder.com/120x160?text=No+Image", width=120)
-    with cols[1]:
-        st.markdown(f"**{name}**")
-        if description:
-            st.write(description[:200] + ("..." if len(description) > 200 else ""))
-        if st.button(f"Open {name}", key=f"open_{name}"):
-            st.session_state["selected_person"] = name
-            st.experimental_rerun()
-
-def home_page():
-    st.title("✨ Legends & Luminaries")
-    st.subheader("Your AI-powered knowledge hub")
-    daily_names = ["Albert Einstein", "Steve Jobs", "Marcus Aurelius", "Maya Angelou"]
-    selected = daily_names[datetime.now().day % len(daily_names)]
-    quotes = fetch_wikiquote_quotes(selected)
-    if quotes:
-        st.info(f"Daily Inspiration: {quotes[0]}")
-    else:
-        st.info("No quote today.")
-    st.markdown("### Featured Achievers")
-    featured = ["Elon Musk", "Sundar Pichai", "Marie Curie", "Greta Thunberg"]
-    for name in featured:
-        render_person_card(name, image_url=fetch_image_url(name))
-
-def explore_page():
-    st.title("Explore by Field")
-    fields = ["Technology","Business","Science","Philosophy","Arts","Sports","Politics","Young Achievers"]
-    field = st.selectbox("Select Field:", fields)
-    data = sparql_query(field)
-    if not data:
-        st.warning("No results found.")
-        return
-    for item in data:
-        render_person_card(
-            name=item["personLabel"]["value"],
-            description=item.get("description", {}).get("value",""),
-            image_url=item.get("image", {}).get("value")
-        )
-
-def search_page():
-    st.title("Search Achievers / AI Search")
-    query = st.text_input("Enter name:")
-    ai_mode = st.checkbox("AI-enhanced search")
-    if query:
-        if ai_mode:
-            st.write(ai_general_search(query))
-        else:
-            summary, _ = fetch_wikipedia_summary(query)
-            if summary:
-                st.write(summary)
-                img = fetch_image_url(query)
-                if img: st.image(img, width=200)
+# ========================
+# PERSON CARD COMPONENT
+# ========================
+def person_card(person_name, desc="", pic=None):
+    with st.container():
+        st.markdown('<div class="person-card">', unsafe_allow_html=True)
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if pic:
+                st.image(pic, use_column_width=True)
             else:
-                st.error("No info found.")
+                st.image("https://via.placeholder.com/150?text=No+Image", use_column_width=True)
+        with col2:
+            st.markdown(f"### {person_name}")
+            if desc:
+                st.caption(desc[:180] + "..." if len(desc) > 180 else desc)
+            if st.button("View Details ➜", key=f"view_{person_name}_{random.random()}"):
+                st.session_state.selected_person = person_name
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-def person_detail_page():
-    name = st.session_state.get("selected_person")
-    if not name:
-        st.warning("No person selected.")
-        return
-    st.title(name)
-    img = fetch_image_url(name)
-    if img: st.image(img, width=250)
-    summary, _ = fetch_wikipedia_summary(name)
-    st.write(summary)
-    with st.expander("Full Biography"):
-        page = wiki.page(name)
-        st.write(page.text)
-    quotes = fetch_wikiquote_quotes(name)
-    if quotes:
-        st.markdown("### Quotes")
-        for q in quotes[:8]: st.write(f"- {q}")
-    st.markdown("### Key Lessons")
-    st.write(ai_generate_lessons(summary))
-    st.markdown("### Ask this person")
-    q = st.text_input("Your question to them:")
-    if q:
-        st.write(ai_chat_as(name, q, summary))
+# ========================
+# TOP HEADER
+# ========================
+st.markdown('<div class="top-header"><h1>✨ Legends & Luminaries</h1><p>An AI-powered hub for inspiration from extraordinary people</p></div>', unsafe_allow_html=True)
 
-def compare_page():
-    st.title("Compare Two People")
-    a = st.text_input("Person A")
-    b = st.text_input("Person B")
-    if a and b:
-        summaryA,_ = fetch_wikipedia_summary(a)
-        summaryB,_ = fetch_wikipedia_summary(b)
-        if summaryA and summaryB:
-            st.write(ai_chat_as(f"Compare {a} vs {b}", "", f"{summaryA}\n{summaryB}"))
+# ========================
+# SIDEBAR NAVIGATION + FAVORITES
+# ========================
+with st.sidebar:
+    st.markdown("### Navigation")
+    page = st.radio("Go to", [
+        "Home", "Explore by Field", "Search", "Emerging Stars",
+        "Philosophers", "Compare Tool", "AI Agent"
+    ])
+
+    st.markdown("---")
+    st.markdown("### ❤️ Favorites")
+    if st.session_state.favorites:
+        for fav in st.session_state.favorites[:]:
+            col1, col2 = st.columns([4,1])
+            with col1:
+                if st.button(fav, key=f"fav_btn_{fav}"):
+                    st.session_state.selected_person = fav
+                    st.rerun()
+            with col2:
+                if st.button("❌", key=f"rem_{fav}"):
+                    st.session_state.favorites.remove(fav)
+                    st.rerun()
+    else:
+        st.caption("No favorites yet")
+
+# ========================
+# PAGE ROUTING
+# ========================
+if st.session_state.selected_person:
+    # PERSON DETAIL PAGE WITH TABS
+    name = st.session_state.selected_person
+    st.markdown(f"## {name}")
+    if st.button("← Back"):
+        st.session_state.selected_person = None
+        st.rerun()
+
+    # Favorite toggle
+    heart = "❤️" if name in st.session_state.favorites else "🤍"
+    if st.button(f"{heart} Favorite", key="fav_toggle"):
+        if name in st.session_state.favorites:
+            st.session_state.favorites.remove(name)
         else:
-            st.error("One or both people not found.")
+            st.session_state.favorites.append(name)
+        st.rerun()
 
-def emerging_page():
-    st.title("Emerging Stars")
-    stars = ["R Praggnanandhaa","Gitanjali Rao","Emma Raducanu","Khaby Lame"]
-    for s in stars:
-        render_person_card(s, image_url=fetch_image_url(s))
+    page_obj = get_wiki_page(name)
+    summary = page_obj.summary if page_obj.exists() else ""
+    full_text = page_obj.text if page_obj.exists() else ""
+    image = get_image_url(name)
+    quotes = get_quotes(name)
 
-def philosophers_page():
-    st.title("Philosophers")
-    names = ["Plato","Aristotle","Socrates","Confucius","Nietzsche"]
-    for n in names:
-        render_person_card(n, image_url=fetch_image_url(n))
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Overview", "Biography", "Quotes", "Key Lessons", "Chat as Person"])
 
-def ai_agent_page():
-    st.title("AI Knowledge Agent")
-    question = st.text_area("Ask anything:")
-    if question:
-        st.write(ai_general_search(question))
+    with tab1:
+        if image:
+            st.image(image, width=300)
+        st.write(summary or "No summary available.")
 
-# ---------------------------
-# SIDEBAR NAVIGATION
-# ---------------------------
-menu = st.sidebar.selectbox("Navigate", [
-    "Home","Explore by Field","Search","Person Details","Philosophers","AI Agent","Compare Tool","Emerging Stars"
-])
+    with tab2:
+        st.write(full_text[:15000] or "No full text available.")
 
-if menu=="Home": home_page()
-elif menu=="Explore by Field": explore_page()
-elif menu=="Search": search_page()
-elif menu=="Person Details": person_detail_page()
-elif menu=="Philosophers": philosophers_page()
-elif menu=="AI Agent": ai_agent_page()
-elif menu=="Compare Tool": compare_page()
-elif menu=="Emerging Stars": emerging_page()
+    with tab3:
+        if quotes:
+            for q in quotes:
+                st.markdown(f"> {q}")
+        else:
+            st.info("No quotes found.")
+
+    with tab4:
+        if summary:
+            with st.spinner("Generating insights..."):
+                lessons = generate_ai(f"Extract 10 key life lessons from this biography in bullet points:\n{summary[:4000]}")
+                st.markdown(lessons)
+        else:
+            st.info("No data for lessons.")
+
+    with tab5:
+        st.markdown("### Talk to this person (AI role-play)")
+        if name not in st.session_state.chat_history:
+            st.session_state.chat_history[name] = []
+        for msg in st.session_state.chat_history[name]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        if prompt := st.chat_input(f"Ask {name}..."):
+            st.session_state.chat_history[name].append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    response = generate_ai(
+                        f"You are {name}. Respond in first person based on known facts and biography:\n{summary[:3000]}\nUser: {prompt}"
+                    )
+                    st.markdown(response)
+            st.session_state.chat_history[name].append({"role": "assistant", "content": response})
+
+else:
+    # MAIN PAGES
+    if page == "Home":
+        st.markdown("### ✨ Daily Inspiration")
+        daily = random.choice(["Elon Musk", "Albert Einstein", "Marie Curie", "Steve Jobs"])
+        q = get_quotes(daily)
+        if q:
+            st.info(f'"{q[0]}" — {daily}')
+        st.markdown("### Featured Legends")
+        for p in ["Elon Musk", "Ada Lovelace", "Leonardo da Vinci", "Serena Williams"]:
+            person_card(p)
+
+    elif page == "Explore by Field":
+        field = st.selectbox("Select Field", list(field_to_qids.keys()))
+        people = get_people_by_field(field_to_qids[field])
+        for p in people:
+            person_card(p["name"], p["desc"], p["pic"])
+
+    elif page == "Search":
+        query = st.text_input("Search for a person")
+        if query:
+            page_obj = get_wiki_page(query)
+            if page_obj.exists():
+                person_card(query, page_obj.summary[:200], get_image_url(query))
+            else:
+                st.error("Not found")
+
+    elif page == "Emerging Stars":
+        st.markdown("### 🌟 Rising Young Achievers")
+        for name in emerging_stars:
+            person_card(name, image_url=get_image_url(name))
+
+    elif page == "Philosophers":
+        philosophers = ["Aristotle", "Plato", "Socrates", "Nietzsche", "Confucius", "Kant"]
+        for name in philosophers:
+            person_card(name, image_url=get_image_url(name))
+
+    elif page == "Compare Tool":
+        col1, col2 = st.columns(2)
+        with col1:
+            p1 = st.text_input("Person 1")
+        with col2:
+            p2 = st.text_input("Person 2")
+        if p1 and p2 and st.button("Compare"):
+            s1 = get_wiki_page(p1).summary if get_wiki_page(p1).exists() else ""
+            s2 = get_wiki_page(p2).summary if get_wiki_page(p2).exists() else ""
+            comparison = generate_ai(f"Compare {p1} and {p2} in a beautiful markdown table + similarities/differences:\n{s1[:2000]}\n{s2[:2000]}")
+            st.markdown(comparison)
+
+    elif page == "AI Agent":
+        st.markdown("### 🤖 AI Knowledge Agent")
+        st.caption("Ask anything about people, history, philosophy, etc.")
+        if "agent_history" not in st.session_state:
+            st.session_state.agent_history = []
+        for msg in st.session_state.agent_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        if prompt := st.chat_input("Your question"):
+            st.session_state.agent_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                with st.spinner("Thinking..."):
+                    resp = generate_ai(prompt)
+                    st.markdown(resp)
+            st.session_state.agent_history.append({"role": "assistant", "content": resp})
