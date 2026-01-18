@@ -3,7 +3,6 @@ import streamlit as st
 import wikipediaapi
 import wikiquote
 import requests
-import re
 from datetime import datetime
 from groq import Groq
 
@@ -29,26 +28,31 @@ if "ai_context" not in st.session_state:
     st.session_state["ai_context"] = {}
 
 # ---------------------------
-# CLIENTS
+# MODEL CONFIGURATION
 # ---------------------------
-def fetch_wikipedia_summary(name: str):
-    if not wiki:
-        return None, None
-    page = wiki.page(name)
-    if page.exists():
-        return page.summary, page.fullurl
-    return None, None
+MODEL_NAME = "mixtral-8x7b"  # Updated Groq model
+
+# ---------------------------
+# CLIENT INITIALIZATION
+# ---------------------------
+try:
+    wiki = wikipediaapi.Wikipedia(language="en")
+except Exception:
+    wiki = None
+
 try:
     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 except Exception:
     client = None
 
 # ---------------------------
-# CACHING + API FUNCTIONS
+# CACHING FUNCTIONS
 # ---------------------------
 @st.cache_data(ttl=3600)
 def fetch_wikipedia_summary(name: str):
     try:
+        if not wiki:
+            return None, None
         page = wiki.page(name)
         if page.exists():
             return page.summary, page.fullurl
@@ -65,13 +69,14 @@ def fetch_wikiquote_quotes(name: str, max_quotes=12):
 
 @st.cache_data(ttl=3600)
 def fetch_image_url(name: str):
+    """Fetch image from Wikipedia API safely."""
     try:
         url = (
             "https://en.wikipedia.org/w/api.php"
             "?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=600"
             f"&titles={requests.utils.quote(name)}"
         )
-        resp = requests.get(url, timeout=8)
+        resp = requests.get(url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         pages = data.get("query", {}).get("pages", {})
@@ -84,6 +89,7 @@ def fetch_image_url(name: str):
 
 @st.cache_data(ttl=3600)
 def sparql_query(field: str):
+    """Query Wikidata for notable people by field."""
     query = f"""
     SELECT ?person ?personLabel ?description ?image WHERE {{
       ?person wdt:P31 wd:Q5 .
@@ -115,7 +121,7 @@ def ai_generate_lessons(summary: str):
         return "AI lessons unavailable."
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b-32768",
+            model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": "Extract key life lessons in bullet points."},
                 {"role": "user", "content": summary}
@@ -132,9 +138,9 @@ def ai_chat_as(name: str, question: str, context: str):
         return "AI unavailable."
     try:
         resp = client.chat.completions.create(
-            model="mixtral-8x7b-32768",
+            model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": f"Act as {name}. Use their tone."},
+                {"role": "system", "content": f"Act as {name}. Use their tone and style."},
                 {"role": "user", "content": f"Context: {context}"},
                 {"role": "user", "content": question}
             ],
@@ -274,7 +280,7 @@ def ai_agent_page():
         st.write(ai_general_search(question))
 
 # ---------------------------
-# SIDEBAR
+# SIDEBAR NAVIGATION
 # ---------------------------
 menu = st.sidebar.selectbox("Navigate", [
     "Home","Explore by Field","Search","Person Details","Philosophers","AI Agent","Compare Tool","Emerging Stars"
