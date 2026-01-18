@@ -27,7 +27,10 @@ if "favorites" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
 
-wiki = wikipediaapi.Wikipedia("en")
+wiki = wikipediaapi.Wikipedia(
+    language="en",
+    user_agent="LegendsLuminariesApp/1.0 (https://example.com)"
+)
 
 # Groq client
 try:
