@@ -1,9 +1,6 @@
-streamlit==1.32.0
-wikipedia-api==0.6.0
-wikiquote==0.1.12
-requests==2.31.0
-pandas==2.2.1
-groq==0.3.0
-python-dateutil==2.8.2
-beautifulsoup4==4.12.2
-SPARQLWrapper==2.0.0
+streamlit
+requests
+wikipedia-api
+wikiquote
+pandas
+groq
