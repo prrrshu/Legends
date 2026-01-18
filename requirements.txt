@@ -1,0 +1,6 @@
+streamlit
+wikipedia-api
+wikiquote
+requests
+pandas
+groq
