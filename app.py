@@ -7,7 +7,6 @@ from groq import Groq
 import re
 import json
 from datetime import datetime
-from streamlit_js_eval import streamlit_js_eval
 
 # ---------------------------------------------------------
 # CONFIGURATION
@@ -33,49 +32,71 @@ if "interest_fields" not in st.session_state:
 # API CLIENTS
 # ---------------------------------------------------------
 
-# Wikipedia client with REQUIRED User-Agent
 wiki = wikipediaapi.Wikipedia(
     language="en",
     extract_format=wikipediaapi.ExtractFormat.WIKI,
-    user_agent="LegendsLuminaries/1.0 (contact: your_email@example.com)"
+    user_agent="LegendsLuminaries/1.0 (contact: admin@example.com)"
 )
 
-# Groq client
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # ---------------------------------------------------------
-# CACHING DECORATORS
+# CACHING + ERROR-SAFE FUNCTIONS
 # ---------------------------------------------------------
 
 @st.cache_data(ttl=3600)
 def fetch_wikipedia_summary(name):
-    page = wiki.page(name)
-    if page.exists():
-        return page.summary, page.fullurl
+    try:
+        page = wiki.page(name)
+        if page.exists():
+            return page.summary, page.fullurl
+    except Exception:
+        pass
     return None, None
+
 
 @st.cache_data(ttl=3600)
 def fetch_wikiquote_quotes(name):
     try:
-        quotes = wikiquote.quotes(name, max_quotes=20)
-        return quotes
+        return wikiquote.quotes(name, max_quotes=20)
     except Exception:
         return []
 
+
 @st.cache_data(ttl=3600)
-def fetch_image_url(name):
-    """Fetch image from Wikipedia via Wikidata"""
-    search_url = f"https://en.wikipedia.org/w/api.php?action=query&titles={name}&prop=pageimages&pithumbsize=600&format=json"
-    resp = requests.get(search_url).json()
-    pages = resp.get("query", {}).get("pages", {})
-    for page in pages.values():
-        if "thumbnail" in page:
-            return page["thumbnail"]["source"]
+def fetch_image_url(name: str):
+    """Robust image fetcher with safe JSON parsing and fallback."""
+    try:
+        url = (
+            "https://en.wikipedia.org/w/api.php"
+            "?action=query&prop=pageimages&format=json&piprop=thumbnail&pithumbsize=600"
+            f"&titles={requests.utils.quote(name)}"
+        )
+
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return None
+
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+
+        pages = data.get("query", {}).get("pages", {})
+
+        for _, p in pages.items():
+            if "thumbnail" in p and "source" in p["thumbnail"]:
+                return p["thumbnail"]["source"]
+
+    except Exception:
+        return None
+
     return None
+
 
 @st.cache_data(ttl=3600)
 def sparql_query(field):
-    """Queries Wikidata for notable people in a specific field."""
+    """Robust Wikidata query with safe fallback."""
     query = f"""
     SELECT ?person ?personLabel ?description ?image WHERE {{
       ?person wdt:P31 wd:Q5 .
@@ -87,52 +108,61 @@ def sparql_query(field):
     }}
     LIMIT 25
     """
+
     url = "https://query.wikidata.org/sparql"
     headers = {"Accept": "application/sparql-results+json"}
-    response = requests.get(url, params={"query": query}, headers=headers)
-    return response.json()["results"]["bindings"]
+
+    try:
+        response = requests.get(url, params={"query": query}, headers=headers, timeout=10)
+        if response.status_code != 200:
+            return []
+        return response.json().get("results", {}).get("bindings", [])
+    except Exception:
+        return []
 
 # ---------------------------------------------------------
 # GROQ AI FUNCTIONS
 # ---------------------------------------------------------
 
 def ai_generate_lessons(summary):
-    """Generate AI key lessons from summary"""
+    if not summary:
+        return "No summary available."
+
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b",
+            model="mixtral-8x7b-32768",
             messages=[
-                {"role": "system", "content": "Extract key life lessons and principles concisely."},
+                {"role": "system", "content": "Extract key life lessons in short bullet points."},
                 {"role": "user", "content": summary}
             ],
-            max_tokens=400,
+            max_tokens=350,
             temperature=0.4
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI Error: {e}"
+        return f"AI Processing Error: {e}"
+
 
 def ai_chat_as(name, question, context):
-    """Roleplay chat as a person"""
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b",
+            model="mixtral-8x7b-32768",
             messages=[
-                {"role": "system", "content": f"Act as {name}. Use their tone and philosophy."},
-                {"role": "user", "content": f"Context: {context}"},
-                {"role": "user", "content": question}
+                {"role": "system", "content": f"Act as {name}. Stay in character."},
+                {"role": "user", "content": f"Background: {context}"},
+                {"role": "user", "content": question},
             ],
             max_tokens=600,
             temperature=0.7
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI Error: {e}"
+        return f"AI Processing Error: {e}"
+
 
 def ai_compare(a, b, contextA, contextB):
-    """Compare two personalities"""
     prompt = f"""
-Compare the following individuals in a structured table:
+Compare these two personalities in a structured table.
 
 Person A: {a}
 Bio: {contextA}
@@ -140,26 +170,34 @@ Bio: {contextA}
 Person B: {b}
 Bio: {contextB}
 
-Include sections: Background, Achievements, Mindset, Habits, Failures, Impact, Legacy.
+Sections:
+- Background
+- Achievements
+- Mindset
+- Habits
+- Failures
+- Impact
+- Legacy
 """
+
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b",
+            model="mixtral-8x7b-32768",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=800,
+            max_tokens=900,
             temperature=0.4
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI Error: {e}"
+        return f"AI Processing Error: {e}"
+
 
 def ai_general_chat(question, context):
-    """General AI Hub"""
     try:
         response = client.chat.completions.create(
-            model="mixtral-8x7b",
+            model="mixtral-8x7b-32768",
             messages=[
-                {"role": "system", "content": "You are an expert knowledge assistant about influential people."},
+                {"role": "system", "content": "You are an AI expert on influential people and philosophy."},
                 {"role": "user", "content": f"Context: {context}"},
                 {"role": "user", "content": question}
             ],
@@ -168,17 +206,7 @@ def ai_general_chat(question, context):
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"AI Error: {e}"
-
-# ---------------------------------------------------------
-# FAVORITES MANAGEMENT
-# ---------------------------------------------------------
-
-def add_to_favorites(name):
-    if name not in st.session_state["favorites"]:
-        st.session_state["favorites"].append(name)
-        streamlit_js_eval(js_expressions="localStorage.setItem('favorites', JSON.stringify(sessionStorage.getItem('favorites')))")
-
+        return f"AI Processing Error: {e}"
 
 # ---------------------------------------------------------
 # UI SECTIONS
@@ -186,22 +214,22 @@ def add_to_favorites(name):
 
 def home_page():
     st.title("✨ Legends & Luminaries")
-    st.subheader("Your AI-powered knowledge hub")
+    st.subheader("Your AI-powered knowledge hub for achievers & thinkers.")
 
-    # Daily quote
+    # Daily Quote
     names = ["Albert Einstein", "Steve Jobs", "Marcus Aurelius", "Maya Angelou", "Napoleon Hill"]
     selected = names[datetime.now().day % len(names)]
     quotes = fetch_wikiquote_quotes(selected)
 
     if quotes:
-        st.info(f"**Daily Inspiration:** {quotes[0]}")
+        st.info(f"Daily Inspiration: {quotes[0]}")
     else:
-        st.info("No quote available.")
+        st.info("No quote available today.")
 
     st.markdown("### Featured Achievers")
     featured = [
         "Sundar Pichai", "Elon Musk", "Marie Curie", "Bill Gates", "APJ Abdul Kalam",
-        "Isha Ambani", "Greta Thunberg", "Malala Yousafzai"
+        "Greta Thunberg", "Malala Yousafzai", "Linus Torvalds"
     ]
 
     cols = st.columns(4)
@@ -215,21 +243,25 @@ def home_page():
                 st.session_state["selected_person"] = name
                 st.experimental_rerun()
 
+
 def explore_by_field():
     st.title("Explore by Field")
-
     fields = ["Technology", "Business", "Science", "Philosophy", "Arts", "Sports", "Politics", "Young Achievers"]
-    field = st.selectbox("Select a field:", fields)
+    field = st.selectbox("Choose a field:", fields)
 
-    data = sparql_query(field)
-    st.write(f"Results for: **{field}**")
+    results = sparql_query(field)
+    st.write(f"Showing results for **{field}**")
+
+    if not results:
+        st.warning("No data available.")
+        return
 
     cols = st.columns(3)
-    for i, item in enumerate(data):
-        with cols[i % 3]:
+    for idx, item in enumerate(results):
+        with cols[idx % 3]:
             name = item["personLabel"]["value"]
             desc = item.get("description", {}).get("value", "")
-            img = item.get("image", {}).get("value", None)
+            img = item.get("image", {}).get("value")
 
             if img:
                 st.image(img, width=180)
@@ -237,13 +269,14 @@ def explore_by_field():
             st.markdown(f"**{name}**")
             st.write(desc)
 
-            if st.button(f"View {name}", key=f"fld_{i}"):
+            if st.button(f"View {name}", key=f"fld_{idx}"):
                 st.session_state["selected_person"] = name
                 st.experimental_rerun()
 
+
 def search_page():
-    st.title("Search")
-    query = st.text_input("Enter a person's name:")
+    st.title("Search Achievers")
+    query = st.text_input("Enter name:")
 
     if query:
         summary, url = fetch_wikipedia_summary(query)
@@ -252,16 +285,18 @@ def search_page():
             if img:
                 st.image(img, width=200)
             st.write(summary)
+
             if st.button("View Details"):
                 st.session_state["selected_person"] = query
                 st.experimental_rerun()
         else:
-            st.error("Person not found.")
+            st.error("No person found.")
+
 
 def person_detail_page():
     name = st.session_state.get("selected_person")
     if not name:
-        st.error("No person selected.")
+        st.warning("No person selected.")
         return
 
     st.title(name)
@@ -273,44 +308,46 @@ def person_detail_page():
     summary, url = fetch_wikipedia_summary(name)
     st.write(summary)
 
+    # Full biography
     with st.expander("Full Biography"):
         page = wiki.page(name)
         st.write(page.text)
 
+    # Quotes
     quotes = fetch_wikiquote_quotes(name)
     if quotes:
         st.markdown("### Quotes")
-        for q in quotes[:10]:
+        for q in quotes[:8]:
             st.write(f"- {q}")
 
+    # AI Lessons
     st.markdown("### Key Lessons")
-    lessons = ai_generate_lessons(summary)
-    st.write(lessons)
+    st.write(ai_generate_lessons(summary))
 
+    # Roleplay Chat
     st.markdown("### Role-play Chat")
-    question = st.text_input("Ask something:")
+    question = st.text_input("Ask something to this person:")
     if question:
-        answer = ai_chat_as(name, question, summary)
-        st.write(answer)
+        st.write(ai_chat_as(name, question, summary))
+
 
 def philosophers_page():
     st.title("Philosophers")
-    st.write("Deep dives into major philosophical figures.")
-    names = ["Plato", "Aristotle", "Socrates", "Confucius", "Nietzsche"]
+    names = ["Plato", "Aristotle", "Confucius", "Socrates", "Nietzsche"]
 
-    for name in names:
-        if st.button(f"View {name}"):
-            st.session_state["selected_person"] = name
+    for n in names:
+        if st.button(f"View {n}"):
+            st.session_state["selected_person"] = n
             st.experimental_rerun()
+
 
 def ai_agent_page():
     st.title("AI Knowledge Agent")
-    question = st.text_area("Ask anything about people or ideas:")
 
+    question = st.text_area("Ask anything:")
     if question:
-        context = "General knowledge database from Wikipedia/Wikiquote"
-        response = ai_general_chat(question, context)
-        st.write(response)
+        st.write(ai_general_chat(question, "General knowledge context"))
+
 
 def compare_page():
     st.title("Compare Two People")
@@ -319,25 +356,27 @@ def compare_page():
     b = st.text_input("Person B")
 
     if a and b:
-        summaryA, _ = fetch_wikipedia_summary(a)
-        summaryB, _ = fetch_wikipedia_summary(b)
+        A, _ = fetch_wikipedia_summary(a)
+        B, _ = fetch_wikipedia_summary(b)
 
-        if summaryA and summaryB:
-            result = ai_compare(a, b, summaryA, summaryB)
-            st.write(result)
-        else:
-            st.error("One or both names not found.")
+        if not A or not B:
+            st.error("One or both people not found.")
+            return
+
+        st.write(ai_compare(a, b, A, B))
+
 
 def emerging_stars_page():
     st.title("Emerging Stars")
+
     stars = [
-        "Khaby Lame", "Ishan Kishan", "R Praggnanandhaa", "Gitanjali Rao",
-        "Emma Raducanu", "Timnit Gebru", "Ben Francis"
+        "R Praggnanandhaa", "Gitanjali Rao", "Emma Raducanu",
+        "Khaby Lame", "Ishan Kishan", "Ben Francis"
     ]
 
-    for s in stars:
-        if st.button(f"View {s}"):
-            st.session_state["selected_person"] = s
+    for name in stars:
+        if st.button(f"View {name}"):
+            st.session_state["selected_person"] = name
             st.experimental_rerun()
 
 # ---------------------------------------------------------
